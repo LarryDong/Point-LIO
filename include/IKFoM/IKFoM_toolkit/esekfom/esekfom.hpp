@@ -87,7 +87,8 @@ public:
 	typedef SparseMatrix<scalar_type> spMt;
 	typedef Matrix<scalar_type, n, 1> vectorized_state;
 	typedef Matrix<scalar_type, m, 1> flatted_state;
-	typedef flatted_state processModel(state &, const input &);
+	// processModel是一个函数，函数类型是：flatted_state (state &, const input &)，即返回 flatted_state，输入是 state 和 input
+	typedef flatted_state processModel(state &, const input &);			
 	typedef Eigen::Matrix<scalar_type, m, n> processMatrix1(state &, const input &);
 	typedef Eigen::Matrix<scalar_type, m, process_noise_dof> processMatrix2(state &, const input &);
 	typedef Eigen::Matrix<scalar_type, process_noise_dof, process_noise_dof> processnoisecovariance;
@@ -103,6 +104,8 @@ public:
 	esekf(const state &x = state(),
 		const cov  &P = cov::Identity()): x_(x), P_(P){};
 
+	//~ 用动态内存共享的方式，进行数据共享。processMatrix1、measurementModel_dyn_share_modified 都是 “函数指针”，传递了对应函数的地址。
+	//~ 这只有一个观测模型，只有lidar的数据。
 	void init_dyn_share_modified(processModel f_in, processMatrix1 f_x_in, measurementModel_dyn_share_modified h_dyn_share_in)
 	{
 		f = f_in;
@@ -116,6 +119,7 @@ public:
 		x_.build_SEN_state();
 	}
 	
+	//~ 这个加入了IMU用作观测数据，即output模式
 	void init_dyn_share_modified_2h(processModel f_in, processMatrix1 f_x_in, measurementModel_dyn_share_modified h_dyn_share_in1, measurementModel_dyn_share_modified h_dyn_share_in2)
 	{
 		f = f_in;
@@ -132,12 +136,14 @@ public:
 
 	// iterated error state EKF propogation
 	void predict(double &dt, processnoisecovariance &Q, const input &i_in, bool predict_state, bool prop_cov){
+		//~ Paper Sec.4.3.1 eq(9)
 		if (predict_state)
 		{
 			flatted_state f_ = f(x_, i_in);
 			x_.oplus(f_, dt);
 		}
 
+		//~ Paper Sec.4.3.1 eq(10)
 		if (prop_cov)
 		{
 			flatted_state f_ = f(x_, i_in);
@@ -169,7 +175,7 @@ public:
 				F_x1.template block<3, 3>(idx, idx) = MTK::SO3<scalar_type>::exp(seg_SO3); // res.normalized().toRotationMatrix();		
 				res_temp_SO3 = MTK::A_matrix(seg_SO3);
 				for(int i = 0; i < n; i++){
-					f_x_final. template block<3, 1>(idx, i) = res_temp_SO3 * (f_x_. template block<3, 1>(dim, i));	
+					f_x_final. template block<3, 1>(idx, i) = res_temp_SO3 * (f_x_. template block<3, 1>(dim, i));
 				}
 			}
 	
@@ -178,7 +184,8 @@ public:
 		}
 	}
 
-	bool update_iterated_dyn_share_modified() {
+	//~ IMU input和output模式都有这个函数
+	bool update_iterated_dyn_share_modified() {			// TODO: 
 		dyn_share_modified<scalar_type> dyn_share;
 		state x_propagated = x_;
 		int dof_Measurement;
@@ -186,7 +193,11 @@ public:
 		for(int i=0; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
-			h_dyn_share_modified_1(x_, dyn_share);
+			// 调用了 h_dyn_share_modified_1 函数，这个函数的类型是 `measurementModel_dyn_share_modified`
+			// measurementModel_dyn_share_modified 是 void (state &, dyn_share_modified<scalar_type> &) 这个类型函数的一个别名；
+			// 具体的，这个函数的实现是： h_dyn_share_modified_1 指向的 `h_dyn_share_in`（在初始化init_dyn_share_modified(_2h)中）
+			// 而 h_dyn_share_in 是 h_model_input，在 estimateor.cpp 中被定义了具体实现。
+			h_dyn_share_modified_1(x_, dyn_share);				// 就是调用了：h_model_input(x_, dyn_share) 这个函数
 			if(! dyn_share.valid)
 			{
 				return false;
@@ -295,6 +306,7 @@ public:
 		return true;
 	}
 	
+	//~ IMU input模式没有这个函数，但output模式有这个函数
 	void update_iterated_dyn_share_IMU() {
 		
 		dyn_share_modified<scalar_type> dyn_share;
@@ -372,6 +384,8 @@ private:
 	cov F_x2 = cov::Identity();
 	cov L_ = cov::Identity();
 
+
+	// 作者代码写的真复杂，这些 f,f_, h_, 都是指向函数的指针，
 	processModel *f;
 	processMatrix1 *f_x;
 	processMatrix2 *f_w;

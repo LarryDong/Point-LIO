@@ -146,6 +146,7 @@ void ImuProcess::Process(const MeasureGroup &meas, PointCloudXYZI::Ptr cur_pcl_u
       imu_need_init_ = false;
     }
     *cur_pcl_un_ = *(meas.lidar);
+    //~ 在fastlio代码中，这里执行了undistort函数；但plio不需要去畸变，因此这个操作就是个简单的赋值。
     return;
   }
 }

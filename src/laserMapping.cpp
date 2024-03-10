@@ -210,6 +210,7 @@ void lasermap_fov_segment()
     if(cub_needrm.size() > 0) int kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
 }
 
+// 一些处理，核心就是将lidar数据存到lidar_buff中。
 void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg) 
 {
     mtx_buffer.lock();
@@ -230,8 +231,8 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     PointCloudXYZI::Ptr  ptr_div(new PointCloudXYZI());
     double time_div = msg->header.stamp.toSec();
-    p_pre->process(msg, ptr);
-    if (cut_frame)
+    p_pre->process(msg, ptr);       //~ 主要是数据格式的统一，以及将每个点的ts存到curvature当中
+    if (cut_frame)                  //~ 将一个frame切分为多块，处理。
     {
         sort(ptr->points.begin(), ptr->points.end(), time_list);
 
@@ -257,7 +258,7 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
             time_buffer.push_back(time_div);
         }
     }
-    else if (con_frame)
+    else if (con_frame)             //~ 将多个frame，concatenate成一个frame处理
     {
         if (frame_ct == 0)
         {
@@ -763,7 +764,8 @@ int main(int argc, char** argv)
     p_imu->lidar_type = p_pre->lidar_type = lidar_type;
     p_imu->imu_en = imu_en;
 
-    kf_input.init_dyn_share_modified(get_f_input, df_dx_input, h_model_input);
+    //~ point-lio-input模型中，状态量是imu的bias，而在point-lio(-output)中加入了加速度和角速度作为状态量
+    kf_input.init_dyn_share_modified(get_f_input, df_dx_input, h_model_input);      //~ TODO: 这个input和output是什么区别？
     kf_output.init_dyn_share_modified_2h(get_f_output, df_dx_output, h_model_output, h_model_IMU_output);
     Eigen::Matrix<double, 24, 24> P_init = MD(24,24)::Identity() * 0.01;
     P_init.block<3, 3>(21, 21) = MD(3,3)::Identity() * 0.0001;
@@ -827,7 +829,7 @@ int main(int argc, char** argv)
                 cout << "first lidar time" << first_lidar_time << endl;
             }
 
-            if (flg_reset)
+            if (flg_reset)          //~ Issue: 这里并没有reset
             {
                 ROS_WARN("reset when rosbag play back");
                 p_imu->Reset();
@@ -841,13 +843,14 @@ int main(int argc, char** argv)
             update_time = 0;
             t0 = omp_get_wtime();
             
-            p_imu->Process(Measures, feats_undistort);
+            p_imu->Process(Measures, feats_undistort);          // 把measure中的lidar给到点云，此时并没有去畸变，因为PLIO不需要去畸变。
 
             // if (feats_undistort->empty() || feats_undistort == NULL)
             if (p_imu->imu_need_init_)
             {
                 continue;
             }
+            //~ 初始化 重力align部分
             if(imu_en)
             {
                 if (!p_imu->gravity_align_)
@@ -859,24 +862,24 @@ int main(int argc, char** argv)
                         imu_deque.pop_front();
                         // imu_deque.pop();
                     }
-                    if (non_station_start)
+                    if (non_station_start)      //~ 这个参数是启动时ros的参数，默认false
                     {
                         state_in.gravity << VEC_FROM_ARRAY(gravity_init);
                         state_out.gravity << VEC_FROM_ARRAY(gravity_init);
                         state_out.acc << VEC_FROM_ARRAY(gravity_init);
                         state_out.acc *= -1;
                     }
-                    else
+                    else                        //~ 采用这段时间的IMU进行平均。
                     {
                         state_in.gravity =  -1 * p_imu->mean_acc * G_m_s2 / acc_norm; 
                         state_out.gravity = -1 * p_imu->mean_acc * G_m_s2 / acc_norm; 
                         state_out.acc = p_imu->mean_acc * G_m_s2 / acc_norm;
                     }
-                    if (gravity_align)
+                    if (gravity_align)          //~ 根据设置的参数，判断是否需要进行 align操作？
                     {
                         Eigen::Matrix3d rot_init;
                         p_imu->gravity_ << VEC_FROM_ARRAY(gravity);
-                        p_imu->Set_init(state_in.gravity, rot_init);
+                        p_imu->Set_init(state_in.gravity, rot_init);        //~ 正交分解与投影；
                         state_in.gravity = p_imu->gravity_;
                         state_out.gravity = p_imu->gravity_;
                         state_in.rot = rot_init;
@@ -886,7 +889,7 @@ int main(int argc, char** argv)
                         state_out.acc = -rot_init.transpose() * state_out.gravity;
                     }
                     kf_input.change_x(state_in);
-                    kf_output.change_x(state_out);
+                    kf_output.change_x(state_out);              //~ 更新重力、和旋转
                     p_imu->gravity_align_ = true;
                 }
             }
@@ -918,21 +921,22 @@ int main(int argc, char** argv)
                 }
             }
             /*** Segment the map in lidar FOV ***/
-            lasermap_fov_segment();
+            lasermap_fov_segment();                             // TODO: 
             /*** downsample the feature points in a scan ***/
             t1 = omp_get_wtime();
             if(space_down_sample)
             {
                 downSizeFilterSurf.setInputCloud(feats_undistort);
                 downSizeFilterSurf.filter(*feats_down_body);
-                sort(feats_down_body->points.begin(), feats_down_body->points.end(), time_list); 
+                sort(feats_down_body->points.begin(), feats_down_body->points.end(), time_list);
+                // ISSUE: 为什么要sort？   根据时间进行排序，保证时间是递增的；目的？？ 这种情况下，点不是按照ring增的顺序排的，而是不同的ring可能交叉排列。
             }
             else
             {
                 feats_down_body = Measures.lidar;
                 sort(feats_down_body->points.begin(), feats_down_body->points.end(), time_list); 
             }
-            time_seq = time_compressing<int>(feats_down_body);
+            time_seq = time_compressing<int>(feats_down_body);      // ISSUE: time_seq是什么？
             feats_down_size = feats_down_body->points.size();
             
             /*** initialize the map kdtree ***/
@@ -950,7 +954,8 @@ int main(int argc, char** argv)
                     pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                 }
                 for (size_t i = 0; i < feats_down_world->size(); i++) {
-                init_feats_world->points.emplace_back(feats_down_world->points[i]);}
+                    init_feats_world->points.emplace_back(feats_down_world->points[i]);
+                }
                 if(init_feats_world->size() < init_map_size) continue;
                 ikdtree.Build(init_feats_world->points); 
                 init_map = true;
@@ -966,15 +971,13 @@ int main(int argc, char** argv)
             t2 = omp_get_wtime();
             
             /*** iterated state estimation ***/
-            crossmat_list.reserve(feats_down_size);
-            pbody_list.reserve(feats_down_size);
+            crossmat_list.reserve(feats_down_size);     // corssmat is the cross product matrix of the point in body frame?? ISSUE: 
+            pbody_list.reserve(feats_down_size);        // pbody is the point in body frame??       ISSUE:
             // pbody_ext_list.reserve(feats_down_size);
-                          
+
             for (size_t i = 0; i < feats_down_body->size(); i++)
             {
-                V3D point_this(feats_down_body->points[i].x,
-                            feats_down_body->points[i].y,
-                            feats_down_body->points[i].z);
+                V3D point_this(feats_down_body->points[i].x, feats_down_body->points[i].y, feats_down_body->points[i].z);
                 pbody_list[i]=point_this;
                 if (extrinsic_est_en)
                 {
@@ -996,7 +999,9 @@ int main(int argc, char** argv)
                 crossmat_list[i]=point_crossmat;
             }
             
-            if (!use_imu_as_input)
+
+            ////////////////////////// imu output 模式  //////////////////////////
+            if (!use_imu_as_input)                  //~ 默认是false，即默认IMU的加速度/角速度是状态量，30维
             {     
                 // bool imu_upda_cov = false;
                 effct_feat_num = 0;
@@ -1010,6 +1015,7 @@ int main(int argc, char** argv)
 
                     time_current = point_body.curvature / 1000.0 + pcl_beg_time;
 
+                    //~ 第一次运行时，设定 time_xxx_last
                     if (is_first_frame)
                     {
                         if(imu_en)
@@ -1044,7 +1050,8 @@ int main(int argc, char** argv)
                             imu_next = *(imu_deque.front());
                             imu_deque.pop_front();
                             double dt = imu_last.header.stamp.toSec() - time_predict_last_const;
-                                kf_output.predict(dt, Q_output, input_in, true, false);
+                            //~ 更新了状态，但没更新协方差？   预测部分，预测时没有考虑饱和。论文4.3.1
+                            kf_output.predict(dt, Q_output, input_in, true, false);                 
                             time_predict_last_const = imu_last.header.stamp.toSec(); // big problem
                             imu_comes = time_current > imu_next.header.stamp.toSec();
                             // if (!imu_comes)
@@ -1056,7 +1063,7 @@ int main(int argc, char** argv)
                                     time_update_last = imu_last.header.stamp.toSec();
                                     double propag_imu_start = omp_get_wtime();
 
-                                    kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                                    kf_output.predict(dt_cov, Q_output, input_in, false, true);     //~ 这里只更新协方差，没更新状态x
 
                                     propag_time += omp_get_wtime() - propag_imu_start;
                                     double solve_imu_start = omp_get_wtime();
@@ -1074,7 +1081,7 @@ int main(int argc, char** argv)
                         double dt_cov = time_current - time_update_last;
                         if (dt_cov > 0.0)
                         {
-                            kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                            kf_output.predict(dt_cov, Q_output, input_in, false, true);     //~ ISSUE: 为什么这里又预测了一次？
                             time_update_last = time_current;   
                         }
                     }
@@ -1095,7 +1102,7 @@ int main(int argc, char** argv)
                         idx += time_seq[k];
                         continue;
                     }
-                    if (!kf_output.update_iterated_dyn_share_modified()) 
+                    if (!kf_output.update_iterated_dyn_share_modified())            //~ ISSUE: modified 是什么？
                     {
                         idx = idx+time_seq[k];
                         continue;
@@ -1144,7 +1151,11 @@ int main(int argc, char** argv)
                     // cout << "pbp output effect feat num:" << effct_feat_num << endl;
                 }
             }
-            else
+            ////////////////////////// imu output 模式   //////////////////////////
+
+
+            ////////////////////////// imu input 模式  //////////////////////////
+            else                                    // else: use_imu_as_input = ture，即加速度/角速度是输入，不是状态量。
             {
                 bool imu_prop_cov = false;
                 effct_feat_num = 0;
@@ -1155,7 +1166,7 @@ int main(int argc, char** argv)
                 {
                     PointType &point_body  = feats_down_body->points[idx+time_seq[k]];
                     time_current = point_body.curvature / 1000.0 + pcl_beg_time;
-                    if (is_first_frame)
+                    if (is_first_frame)             // if 第一次运行。
                     {
                         while (time_current > imu_next.header.stamp.toSec()) 
                         {
@@ -1179,18 +1190,9 @@ int main(int argc, char** argv)
                             input_in.acc<<imu_last.linear_acceleration.x,
                                         imu_last.linear_acceleration.y,
                                         imu_last.linear_acceleration.z;
-                            // angvel_avr<<0.5 * (imu_last.angular_velocity.x + imu_next.angular_velocity.x),
-                            //             0.5 * (imu_last.angular_velocity.y + imu_next.angular_velocity.y),
-                            //             0.5 * (imu_last.angular_velocity.z + imu_next.angular_velocity.z);
-                                            
-                            // acc_avr   <<0.5 * (imu_last.linear_acceleration.x + imu_next.linear_acceleration.x),
-                            //             0.5 * (imu_last.linear_acceleration.y + imu_next.linear_acceleration.y),
-                                        // 0.5 * (imu_last.linear_acceleration.z + imu_next.linear_acceleration.z);
-
-                            // angvel_avr -= state.bias_g;
                             input_in.acc = input_in.acc * G_m_s2 / acc_norm;
                         }
-                    }
+                    }   // if 第一次运行。
                     
                     while (time_current > imu_next.header.stamp.toSec()) // && !imu_deque.empty())
                     {
@@ -1200,13 +1202,6 @@ int main(int argc, char** argv)
                         input_in.gyro<<imu_last.angular_velocity.x, imu_last.angular_velocity.y, imu_last.angular_velocity.z;
                         input_in.acc <<imu_last.linear_acceleration.x, imu_last.linear_acceleration.y, imu_last.linear_acceleration.z; 
 
-                        // angvel_avr<<0.5 * (imu_last.angular_velocity.x + imu_next.angular_velocity.x),
-                        //             0.5 * (imu_last.angular_velocity.y + imu_next.angular_velocity.y),
-                        //             0.5 * (imu_last.angular_velocity.z + imu_next.angular_velocity.z);
-                                        
-                        // acc_avr   <<0.5 * (imu_last.linear_acceleration.x + imu_next.linear_acceleration.x),
-                        //             0.5 * (imu_last.linear_acceleration.y + imu_next.linear_acceleration.y),
-                        //             0.5 * (imu_last.linear_acceleration.z + imu_next.linear_acceleration.z);
                         input_in.acc    = input_in.acc * G_m_s2 / acc_norm; 
                         double dt = imu_last.header.stamp.toSec() - t_last;
 
@@ -1228,7 +1223,7 @@ int main(int argc, char** argv)
                     t_last = time_current;
                     double propag_start = omp_get_wtime();
                     
-                    if(!prop_at_freq_of_imu)
+                    if(!prop_at_freq_of_imu)            //~ ISSUE: 这是什么含义？
                     {   
                         double dt_cov = time_current - time_update_last;
                         if (dt_cov > 0.0)
@@ -1294,14 +1289,16 @@ int main(int argc, char** argv)
                     {
                         PointType &point_body_j  = feats_down_body->points[idx+j+1];
                         PointType &point_world_j = feats_down_world->points[idx+j+1];
-                        pointBodyToWorld(&point_body_j, &point_world_j); 
+                        pointBodyToWorld(&point_body_j, &point_world_j);                        //~ 转到world系
                     }
                     solve_time += omp_get_wtime() - solve_start;
                 
                     update_time += omp_get_wtime() - t_update_start;
                     idx = idx + time_seq[k];
                 }  
-            }
+            }       // else{}
+            ////////////////////////// imu input 模式  //////////////////////////
+
 
             /******* Publish odometry downsample *******/
             if (!publish_odometry_without_downsample)

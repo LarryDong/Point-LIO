@@ -84,10 +84,12 @@ std::vector<int> time_compressing(const PointCloudXYZI::Ptr &point_cloud)
   std::vector<int> time_seq;
   // time_seq.clear();
   time_seq.reserve(points_size);
-  for(int i = 0; i < points_size - 1; i++)
+  for(int i = 0; i < points_size - 1; i++)          //~ DEBUG: 测一下这个 time_seq 到底是什么？
   {
     j++;
-    if (point_cloud->points[i+1].curvature > point_cloud->points[i].curvature)
+    //~ curvature 存的是 当前点在ring中的时间offset？ 正常情况下，都是大于号成立，因此time_seq的值都是1？ 
+    //~ 但如果不成立，相当于到了下一个scan，此时j就不是0，所以最后(j+1)放到time_seq中就是2了？
+    if (point_cloud->points[i+1].curvature > point_cloud->points[i].curvature)      
     {
       time_seq.emplace_back(j);
       j = 0;
