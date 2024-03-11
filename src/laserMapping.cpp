@@ -765,7 +765,7 @@ int main(int argc, char** argv)
     p_imu->imu_en = imu_en;
 
     //~ point-lio-input模型中，状态量是imu的bias，而在point-lio(-output)中加入了加速度和角速度作为状态量
-    kf_input.init_dyn_share_modified(get_f_input, df_dx_input, h_model_input);      //~ TODO: 这个input和output是什么区别？
+    kf_input.init_dyn_share_modified(get_f_input, df_dx_input, h_model_input);      // ISSUE: 为什么同时需要input和output，而不是选择？
     kf_output.init_dyn_share_modified_2h(get_f_output, df_dx_output, h_model_output, h_model_IMU_output);
     Eigen::Matrix<double, 24, 24> P_init = MD(24,24)::Identity() * 0.01;
     P_init.block<3, 3>(21, 21) = MD(3,3)::Identity() * 0.0001;
