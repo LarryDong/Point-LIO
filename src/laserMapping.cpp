@@ -27,6 +27,9 @@
 #include "Estimator.h"
 // #include <ros/console.h>
 
+#include <iostream>
+using std::cout, std::endl;
+
 
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
@@ -297,6 +300,7 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg) 
 {
     mtx_buffer.lock();
+    cout << " PC callback: received points: " << msg->point_num << endl;
     double preprocess_start_time = omp_get_wtime();
     scan_count ++;
     if (msg->header.stamp.toSec() < last_timestamp_lidar)
@@ -402,6 +406,9 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
+
+//~ After sync, the IMU data is between lidar frame's (begin to end), and the next IMU is after lidar's end time.
+
 bool sync_packages(MeasureGroup &meas)
 {
     if (!imu_en)
@@ -463,7 +470,7 @@ bool sync_packages(MeasureGroup &meas)
         lidar_pushed = true;
     }
 
-    if (last_timestamp_imu < lidar_end_time)
+    if (last_timestamp_imu < lidar_end_time)            //~ make sure the next IMU is after lidar's end. So all IMU between one lidar scan.
     {
         return false;
     }
@@ -821,7 +828,9 @@ int main(int argc, char** argv)
         if (flg_exit) break;
         ros::spinOnce();
         if(sync_packages(Measures)) 
-        {
+        {   
+            ROS_WARN(" == New Measure Got");
+            cout << "IMU size: " << Measures.imu.size() << ", lidar points: " << Measures.lidar->size() << endl;
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
@@ -829,7 +838,7 @@ int main(int argc, char** argv)
                 cout << "first lidar time" << first_lidar_time << endl;
             }
 
-            if (flg_reset)          //~ Issue: 这里并没有reset
+            if (flg_reset)          //~ Issue: flg_reset is always false.
             {
                 ROS_WARN("reset when rosbag play back");
                 p_imu->Reset();
@@ -890,6 +899,17 @@ int main(int argc, char** argv)
                     }
                     kf_input.change_x(state_in);
                     kf_output.change_x(state_out);              //~ 更新重力、和旋转
+
+                    //~ Output state;
+                    ROS_WARN(" ---- Init ----");
+                    kf_output.print_x();
+                    // auto x = kf_output.get_x();
+                    // auto P = kf_output.get_P();
+                    // ROS_INFO_STREAM(" state -----------");
+                    // ROS_INFO_STREAM(" pos: " << x.pos(0) << ", " << x.pos(1) << ", " << x.pos(2));
+                    // V3D euler_angle = SO3ToEuler(kf_output.x_.rot);
+                    // ROS_INFO_STREAM(" Rot: " << euler_angle.transpose());
+
                     p_imu->gravity_align_ = true;
                 }
             }
@@ -996,7 +1016,7 @@ int main(int argc, char** argv)
                 }
                 M3D point_crossmat;
                 point_crossmat << SKEW_SYM_MATRX(point_this);
-                crossmat_list[i]=point_crossmat;
+                crossmat_list[i]=point_crossmat;            //~ Used for Point-to-Plane residual?
             }
             
 
@@ -1009,10 +1029,16 @@ int main(int argc, char** argv)
 
                 double pcl_beg_time = Measures.lidar_beg_time;
                 idx = -1;
+
+                // DEBUG: what is time_seq??
+                ROS_INFO_STREAM("time_seq.size() is: "<<time_seq.size());
+
+                int predict_x_cnt = 0, predict_cov_cnt = 0;
+                int update_iterated_dyn_share_IMU_cnt = 0,  update_iterated_dyn_share_modified_cnt = 0;
+
                 for (k = 0; k < time_seq.size(); k++)
                 {
                     PointType &point_body  = feats_down_body->points[idx+time_seq[k]];
-
                     time_current = point_body.curvature / 1000.0 + pcl_beg_time;
 
                     //~ 第一次运行时，设定 time_xxx_last
@@ -1038,9 +1064,17 @@ int main(int argc, char** argv)
                     }
                     if(imu_en)
                     {
+                        //~ time_current is "current lidar point" time. 
+                        //~ Most cases, Lidar point frequency is higher than IMU.
+                        // So, `imu_comes` is `true` after a IMU appears after a piont in one scan. 
+                        //   Then, predict by "New" IMU, and update the state using `update_iterated_dyn_share_IMU` (only IMU)
+                        //   Else, no while-loop. Use IMU state to predict, but no IMU update. Only LiDAR update, by `update_iterated_dyn_share_modified()`.
+
                         bool imu_comes = time_current > imu_next.header.stamp.toSec();
-                        while (imu_comes) 
+                        int imu_comes_counter = 0;
+                        while (imu_comes)           //~ This function seldom used. Most of times, imu_comes=false.
                         {
+                            imu_comes_counter++;
                             // imu_upda_cov = true;
                             angvel_avr<<imu_next.angular_velocity.x, imu_next.angular_velocity.y, imu_next.angular_velocity.z;
                             acc_avr   <<imu_next.linear_acceleration.x, imu_next.linear_acceleration.y, imu_next.linear_acceleration.z;
@@ -1052,6 +1086,11 @@ int main(int argc, char** argv)
                             double dt = imu_last.header.stamp.toSec() - time_predict_last_const;
                             //~ 更新了状态，但没更新协方差？   预测部分，预测时没有考虑饱和。论文4.3.1
                             kf_output.predict(dt, Q_output, input_in, true, false);                 
+                            predict_x_cnt++;
+
+                            // ROS_WARN(" ---- Predict 1: update x ----");
+                            // kf_output.print_x();
+
                             time_predict_last_const = imu_last.header.stamp.toSec(); // big problem
                             imu_comes = time_current > imu_next.header.stamp.toSec();
                             // if (!imu_comes)
@@ -1064,20 +1103,29 @@ int main(int argc, char** argv)
                                     double propag_imu_start = omp_get_wtime();
 
                                     kf_output.predict(dt_cov, Q_output, input_in, false, true);     //~ 这里只更新协方差，没更新状态x
+                                    predict_cov_cnt++;
+                                    // ROS_WARN(" ---- Predict 1: update cov----");        //~ DEBUG: 
+                                    // kf_output.print_x();
 
                                     propag_time += omp_get_wtime() - propag_imu_start;
                                     double solve_imu_start = omp_get_wtime();
                                     kf_output.update_iterated_dyn_share_IMU();
+                                    update_iterated_dyn_share_IMU_cnt++;
+
+                                    
                                     solve_time += omp_get_wtime() - solve_imu_start;
                                 }
                             }
                         }
+                        cout << "IMU_comes while loop-times: " << imu_comes_counter << endl;
                     }
 
                     double dt = time_current - time_predict_last_const;
                     double propag_state_start = omp_get_wtime();
-                    if(!prop_at_freq_of_imu)
+                    
+                    if(!prop_at_freq_of_imu)            //~ prop_at_freq_of_imu = true.
                     {
+                        cout << "ISSUE: prop_at_freq_of_imu is true. So not this line appears." << endl; 
                         double dt_cov = time_current - time_update_last;
                         if (dt_cov > 0.0)
                         {
@@ -1085,7 +1133,11 @@ int main(int argc, char** argv)
                             time_update_last = time_current;   
                         }
                     }
-                        kf_output.predict(dt, Q_output, input_in, true, false);
+
+                    kf_output.predict(dt, Q_output, input_in, true, false);
+                    // ROS_WARN_STREAM(" ---- Predict 2: cov ? Why predict again? "<<__LINE__ << " in file: "<< __FILE__);        //~ DEBUG: 
+                    // kf_output.print_x();
+
                     propag_time += omp_get_wtime() - propag_state_start;
                     time_predict_last_const = time_current;
                     // if(k == 0)
@@ -1104,22 +1156,16 @@ int main(int argc, char** argv)
                     }
                     if (!kf_output.update_iterated_dyn_share_modified())            //~ ISSUE: modified 是什么？
                     {
+                        // ROS_WARN_STREAM(" ---- Predict 2 ? Why predict again? "<<__LINE__ << " in file: "<< __FILE__);        //~ DEBUG: 
+                        // kf_output.print_x();
+                        update_iterated_dyn_share_modified_cnt++;
                         idx = idx+time_seq[k];
+                        cout << "update_iterated_dyn_share_modified = false, in line: " << __LINE__ << endl;
                         continue;
                     }
-
-                    // if(prop_at_freq_of_imu)
-                    // {
-                        // double dt_cov = time_current - time_update_last;
-                        // if ((dt_cov >= imu_time_inte)) // (point_cov_not_prop && imu_prop_cov)
-                        // {
-                        //     double propag_cov_start = omp_get_wtime();
-                        //     kf_output.predict(dt_cov, Q_output, input_in, false, true);
-                        //     // imu_upda_cov = false;
-                        //     time_update_last = time_current;
-                        //     propag_time += omp_get_wtime() - propag_cov_start;
-                        // }
-                    // }
+                    else{       // DEBUG:
+                        update_iterated_dyn_share_modified_cnt++;
+                    }
 
                     solve_start = omp_get_wtime();
                         
@@ -1141,7 +1187,7 @@ int main(int argc, char** argv)
                     {
                         PointType &point_body_j  = feats_down_body->points[idx+j+1];
                         PointType &point_world_j = feats_down_world->points[idx+j+1];
-                        pointBodyToWorld(&point_body_j, &point_world_j);
+                        pointBodyToWorld(&point_body_j, &point_world_j);        //~ for each point, to world after update the state.
                     }
                 
                     solve_time += omp_get_wtime() - solve_start;
@@ -1149,6 +1195,11 @@ int main(int argc, char** argv)
                     update_time += omp_get_wtime() - t_update_start;
                     idx += time_seq[k];
                     // cout << "pbp output effect feat num:" << effct_feat_num << endl;
+
+                    cout << "Point Updated. Idx: " << k << endl;
+                    cout << "Predict time: x: " << predict_x_cnt << ",  cov: " << predict_cov_cnt << endl;
+                    cout << "update_iterated_dyn_share_IMU time : " << update_iterated_dyn_share_IMU_cnt  << ",  update_iterated_dyn_share_modified: " << update_iterated_dyn_share_modified_cnt << endl;
+
                 }
             }
             ////////////////////////// imu output 模式   //////////////////////////
@@ -1225,6 +1276,7 @@ int main(int argc, char** argv)
                     
                     if(!prop_at_freq_of_imu)            //~ ISSUE: 这是什么含义？
                     {   
+                        cout << "ISSUE: prop_at_freq_of_imu is true. So not this line appears." << endl; 
                         double dt_cov = time_current - time_update_last;
                         if (dt_cov > 0.0)
                         {    

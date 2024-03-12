@@ -54,6 +54,9 @@
 #include "../mtk/build_manifold.hpp"
 #include "util.hpp"
 
+// Dongyan's
+#include <iostream>
+
 namespace esekfom {
 
 using namespace Eigen;
@@ -365,6 +368,32 @@ public:
 	void change_P(cov &input_cov)
 	{
 		P_ = input_cov;
+	}
+
+	//~ defined by DongYan
+	void print_x(void){
+		using namespace std;
+		cout << "State: ------- " << endl;
+		cout << " pos: " << x_.pos(0) << ", " << x_.pos(1) << ", " << x_.pos(2) << endl;
+
+		auto rot = x_.rot;
+		double sy = sqrt(rot(0,0)*rot(0,0) + rot(1,0)*rot(1,0));
+		bool singular = sy < 1e-6;
+		double x, y, z;
+		if(!singular)
+		{
+			x = atan2(rot(2, 1), rot(2, 2));
+			y = atan2(-rot(2, 0), sy);   
+			z = atan2(rot(1, 0), rot(0, 0));  
+		}
+		else
+		{    
+			x = atan2(-rot(1, 2), rot(1, 1));    
+			y = atan2(-rot(2, 0), sy);    
+			z = 0;
+		}
+		Eigen::Matrix<double, 3, 1> e(x, y, z);
+		cout << " euler: " << e(0) << ", " << e(1) << ", " << e(2) << endl;
 	}
 
 	const state& get_x() const {
