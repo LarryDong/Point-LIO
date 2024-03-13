@@ -90,7 +90,8 @@ public:
 	typedef SparseMatrix<scalar_type> spMt;
 	typedef Matrix<scalar_type, n, 1> vectorized_state;
 	typedef Matrix<scalar_type, m, 1> flatted_state;
-	// processModel是一个函数，函数类型是：flatted_state (state &, const input &)，即返回 flatted_state，输入是 state 和 input
+	// processModel是一个函数，函数类型是：flatted_state (state &, const input &)，即返回 flatted_state，输入是 state 和 input。
+	// 其实，这个processModel、processMatrix这些并不重要，只是一个代号。本质上时调用的对应函数。
 	typedef flatted_state processModel(state &, const input &);			
 	typedef Eigen::Matrix<scalar_type, m, n> processMatrix1(state &, const input &);
 	typedef Eigen::Matrix<scalar_type, m, process_noise_dof> processMatrix2(state &, const input &);
@@ -107,8 +108,8 @@ public:
 	esekf(const state &x = state(),
 		const cov  &P = cov::Identity()): x_(x), P_(P){};
 
-	//~ 用动态内存共享的方式，进行数据共享。processMatrix1、measurementModel_dyn_share_modified 都是 “函数指针”，传递了对应函数的地址。
-	//~ 这只有一个观测模型，只有lidar的数据。
+	// 用动态内存共享的方式，进行数据共享。processMatrix1、measurementModel_dyn_share_modified 都是 “函数指针”，传递了对应函数的地址。
+	// 这只有一个观测模型，只有lidar的数据。
 	void init_dyn_share_modified(processModel f_in, processMatrix1 f_x_in, measurementModel_dyn_share_modified h_dyn_share_in)
 	{
 		f = f_in;
@@ -122,7 +123,7 @@ public:
 		x_.build_SEN_state();
 	}
 	
-	//~ 这个加入了IMU用作观测数据，即output模式
+	// 这个加入了IMU用作观测数据，即output模式
 	// f_in: get_f_output
 	// f_x_in: df_dx_output
 	// h_dyn_share_in1: h_model_output
@@ -142,7 +143,7 @@ public:
 	}
 
 	// iterated error state EKF propogation.
-	//~ Section. 4.3.1
+	// Section. 4.3.1
 	void predict(double &dt, processnoisecovariance &Q, const input &i_in, bool predict_state, bool prop_cov){
 		if (predict_state)
 		{
@@ -191,8 +192,7 @@ public:
 		}
 	}
 
-	//~ IMU input和output模式都有这个函数
-	// LiDAR update?
+	// LiDAR 的 update，论文 Algorithm1 的4-8行
 	bool update_iterated_dyn_share_modified() {			// TODO: 
 		dyn_share_modified<scalar_type> dyn_share;
 		state x_propagated = x_;
@@ -205,18 +205,22 @@ public:
 			// measurementModel_dyn_share_modified 是 void (state &, dyn_share_modified<scalar_type> &) 这个类型函数的一个别名；
 			// 具体的，这个函数的实现是： h_dyn_share_modified_1 指向的 `h_dyn_share_in`（在初始化init_dyn_share_modified(_2h)中）
 			// 而 h_dyn_share_in 是 h_model_output estimateor.cpp 中被定义了具体实现。
-			h_dyn_share_modified_1(x_, dyn_share);				// 就是调用了: h_model_output(x_, dyn_share) 这个函数, LiDAR's observation model.
+			
+			// h_dyn_share_modified_1 本质上是调用的 h_model_output，计算了残差r_L、H_L，但没有D
+			h_dyn_share_modified_1(x_, dyn_share);
+			
 			if(! dyn_share.valid)
 			{
 				return false;
 				// continue;
 			}
-			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> z = dyn_share.z;			//~ LiDAR residual. eq(12)'s r_L_{k+1}
+			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> z = dyn_share.z;			// 获取残差
 			// Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> R = dyn_share.R; 
-			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x = dyn_share.h_x;		//~ This `h_x` is first 12 cols of 'H_L_{k+1}' in eq(12)(13), and the following 0x18 is omitted.
+			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x = dyn_share.h_x;		// 获取 H_L，只有12列
 			// Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_v = dyn_share.h_v;
-			dof_Measurement = h_x.rows();
-			m_noise = dyn_share.M_Noise;
+			
+			dof_Measurement = h_x.rows();	// h_x 的行数，是测量的次数。
+			m_noise = dyn_share.M_Noise;	// LiDAR的测量噪声，3x3，是初始化来的。 IDEA: 雷达的噪声，是否可以根据振动情况，动态调整？
 			// dof_Measurement_noise = dyn_share.R.rows();
 			// vectorized_state dx, dx_new;
 			// x_.boxminus(dx, x_propagated);
@@ -226,16 +230,20 @@ public:
 			Matrix<scalar_type, n, Eigen::Dynamic> PHT;
 			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> HPHT;
 			Matrix<scalar_type, n, Eigen::Dynamic> K_;
+			
+			// 如果观测的维度较小，则直接常规计算Kalman的方式即可。
 			if(n > dof_Measurement)
 			{
 				PHT = P_. template block<n, 12>(0, 0) * h_x.transpose();
 				HPHT = h_x * PHT.topRows(12);
 				for (int m = 0; m < dof_Measurement; m++)
 				{
-					HPHT(m, m) += m_noise;
+					HPHT(m, m) += m_noise;		// 注意这里的噪声，并没有按照论文里面，加上了D，可能是因为确实没有太大的影响。
 				}
 				K_= PHT*HPHT.inverse();
 			}
+			// 如果观测的维度较大，此时计算HPHT的逆矩阵可能会比较困难。
+			// 此时，采用了Fast-lio中提出的近似方法，参考 fast-lio2 的 eq(18) 计算增益K
 			else
 			{
 				Matrix<scalar_type, 12, 12> HTH = m_noise * h_x.transpose() * h_x;
@@ -244,24 +252,22 @@ public:
 				P_inv = P_inv.inverse();
 				K_ = P_inv.template block<n, 12>(0, 0) * h_x.transpose() * m_noise;
 			}
+
 			Matrix<scalar_type, n, 1> dx_ = K_ * z; // - h) + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; 
 			// state x_before = x_;
 
 			x_.boxplus(dx_);
 			dyn_share.converge = true;
-			
-			//~ only update the first 12 state. <pos, rotation, extrins_R, extrins_T>, 
-			// the acc/gyro/bg/ba are updated in `update_iterated_dyn_share_IMU`.
-			// But vel, grav, are not updated.
 			{
 				P_ = P_ - K_*h_x*P_. template block<12, n>(0, 0);		// eq(20)-4, update lidar's part P_
 			}
+
+			// 可以看到，LiDAR的update，只对：pos, rot, extrins_R, extrins_T，这几个状态有降低协方差的作用。
 		}
 		return true;
 	}
 	
-	//~ IMU input模式没有这个函数，但output模式有这个函数
-	// IMU IKEF update process. See Algorithm1 line 12~16
+	// IMU 的 update，论文 Algorithm1 的12-16行
 	void update_iterated_dyn_share_IMU() {
 		
 		dyn_share_modified<scalar_type> dyn_share;
@@ -269,44 +275,60 @@ public:
 		{
 			dyn_share.valid = true;
 
-			//~ `h_dyn_share_modified_2` is `h_model_IMU_output()`, IMU observation model. Get residual z.
-			h_dyn_share_modified_2(x_, dyn_share);				// this 
+			// 观测模型，论文 Algorithm1 的 14 行，计算 残差r
+			// 但没有计算D(对噪声的偏导)、H(对状态的偏导)，因为都是简单的单位阵块，是后面直接加上的。
+			h_dyn_share_modified_2(x_, dyn_share);
 
-			Matrix<scalar_type, 6, 1> z = dyn_share.z_IMU;		//~ z is residual. eq(14) result.
-			//~ PHt, HP, HPHt, is in eq(20)
+			Matrix<scalar_type, 6, 1> z = dyn_share.z_IMU;		// 获得残差
+
+			// eq(20) 中的PHT, HP, HPHT，都是中间变量
 			Matrix<double, 30, 6> PHT;
             Matrix<double, 6, 30> HP;
             Matrix<double, 6, 6> HPHT;
 			PHT.setZero();
 			HP.setZero();
 			HPHT.setZero();
+
+			// 状态定义
+			// 0-((vect3, pos))  
+			// 3-((SO3, rot))
+			// 6-((SO3, offset_R_L_I))
+			// 9-((vect3, offset_T_L_I))
+			// 12-((vect3, vel))
+			// 15-((vect3, omg))
+			// 18-((vect3, acc))
+			// 21-((vect3, gravity))
+			// 24-((vect3, bg))
+			// ((vect3, ba))
+			for (int l_ = 0; l_ < 6; l_++)			// 6是IMU的6个观测维度，加速度+角速度
+			{
+				if (!dyn_share.satu_check[l_])
+				{	
+					// P*H' 中的 H 是IMU的观测模型，eq(15)，因为只有单位阵，所以直接保留了 P 的acc和gyro的数值与bias对应的block
+					PHT.col(l_) = P_.col(15+l_) + P_.col(24+l_);	
+					HP.row(l_) = P_.row(15+l_) + P_.row(24+l_);
+				}
+			}
+
+			// eq(20)的第3个式子，需要HPH'，以及噪声 R
 			for (int l_ = 0; l_ < 6; l_++)
 			{
 				if (!dyn_share.satu_check[l_])
 				{
-					PHT.col(l_) = P_.col(15+l_) + P_.col(24+l_);
-					HP.row(l_) = P_.row(15+l_) + P_.row(24+l_);	//~ HP is H*P in eq(20), where H is eq(15). So only some block of P is used.
+					HPHT.col(l_) = HP.col(15+l_) + HP.col(24+l_);	// eq(20)-3，H_I*P*H_I' 只剩下了这么几块
 				}
+				HPHT(l_, l_) += dyn_share.R_IMU(l_); //, l);		// eq(20)-3, 测量的噪声，由初始化时直接给定了。此时直接加上即可。
 			}
 
-			//~ update state by IMU's measurement. Only for 15(omg)-21(acc), 24(bg)-30(ba). l is the IMU dimension
-			for (int l_ = 0; l_ < 6; l_++)
-			{
-				if (!dyn_share.satu_check[l_])
-				{
-					HPHT.col(l_) = HP.col(15+l_) + HP.col(24+l_);	// eq(20)-3, HPH+R,
-				}
-				HPHT(l_, l_) += dyn_share.R_IMU(l_); //, l);		// eq(20)-3, R.
-			}
-        	Eigen::Matrix<double, 30, 6> K = PHT * HPHT.inverse(); 	// Kalman gain. P*H'*(H*P*H')^-1
+            Matrix<scalar_type, n, 1> dx_ = K * z; 					// eq(21) 中的增量部分
 
-            Matrix<scalar_type, n, 1> dx_ = K * z; 					// eq(21)'s \delta_x_{k+1}
-
-            P_ -= K * HP;			// eq(20)-4
-			x_.boxplus(dx_);		// eq(21)
+            P_ -= K * HP;			// eq(20)-4，协方差的收敛
+			x_.boxplus(dx_);		// eq(21)的oplus把增量加上
 		}
 
-		//~ eq(22)~(24) seems no implementation. J_{k+1} should be very near to I.
+		// 注意，论文中的 eq(22)-(24)并没有找到。根据原理，这个J应该接近单位阵I，因此误差注入部分可以忽略。
+		// 同时，可以看出，IMU的update，只对：acc, gyro, ba, bg，这几个状态有降低协方差的作用。
+		// 此时，应该注意到，vel和grav这两个状态，自始至终都没有update，即IMU和LiDAR的观测，都没有update。预测时，协方差也没有传播，g的作用貌似只有在更新vel时起了作用。
 		return;
 	}
 	
@@ -326,32 +348,6 @@ public:
 	void change_P(cov &input_cov)
 	{
 		P_ = input_cov;
-	}
-
-	//~ defined by DongYan
-	void print_x(void){
-		using namespace std;
-		cout << "State: ------- " << endl;
-		cout << " pos: " << x_.pos(0) << ", " << x_.pos(1) << ", " << x_.pos(2) << endl;
-
-		auto rot = x_.rot;
-		double sy = sqrt(rot(0,0)*rot(0,0) + rot(1,0)*rot(1,0));
-		bool singular = sy < 1e-6;
-		double x, y, z;
-		if(!singular)
-		{
-			x = atan2(rot(2, 1), rot(2, 2));
-			y = atan2(-rot(2, 0), sy);   
-			z = atan2(rot(1, 0), rot(0, 0));  
-		}
-		else
-		{    
-			x = atan2(-rot(1, 2), rot(1, 1));    
-			y = atan2(-rot(2, 0), sy);    
-			z = 0;
-		}
-		Eigen::Matrix<double, 3, 1> e(x, y, z);
-		cout << " euler: " << e(0) << ", " << e(1) << ", " << e(2) << endl;
 	}
 
 	const state& get_x() const {
