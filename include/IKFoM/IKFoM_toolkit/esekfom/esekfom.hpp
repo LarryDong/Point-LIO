@@ -305,6 +305,8 @@ public:
             P_ -= K * HP;			// eq(20)-4
 			x_.boxplus(dx_);		// eq(21)
 		}
+
+		//~ eq(22)~(24) seems no implementation. J_{k+1} should be very near to I.
 		return;
 	}
 	
