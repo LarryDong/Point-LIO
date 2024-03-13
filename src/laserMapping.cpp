@@ -771,11 +771,16 @@ int main(int argc, char** argv)
     p_imu->lidar_type = p_pre->lidar_type = lidar_type;
     p_imu->imu_en = imu_en;
 
-    //~ Initialize pointers.
-    //~ point-lio-input模型中，状态量是imu的bias，而在point-lio(-output)中加入了加速度和角速度作为状态量
-    kf_input.init_dyn_share_modified(get_f_input, df_dx_input, h_model_input);      // ISSUE: 为什么同时需要input和output，而不是选择？
-    kf_output.init_dyn_share_modified_2h(get_f_output, df_dx_output, h_model_output, h_model_IMU_output);
+    // point-lio-input模型中，状态量是imu的bias，而在point-lio(-output)中加入了加速度和角速度作为状态量
+    // 虽然同时有input和output，但设定好了以后，算法只有一个在工作。
+    kf_input.init_dyn_share_modified(get_f_input, df_dx_input, h_model_input);
 
+    // 以 output 模式为例，IMU是当作观测量，同时状态维护了一个30维向量，包括IMU的加速度/角速度，需要根据IMU的观测量进行更新。
+    // 在这个 init 初始化时，将不同的函数指针赋予了类内部的函数指针，后续调用类的函数进行计算。
+    // 这里输入的是：
+    // @get_f_output：eq(9)的 f(x,u) 中的f
+    // @df_dx_output：eq(9)的 f(x,u) 中的f对x的偏导，eq(11)中的 F_{x_k}，但没有对角线、没有乘时间间隔 dt
+    kf_output.init_dyn_share_modified_2h(get_f_output, df_dx_output, h_model_output, h_model_IMU_output);
 
     Eigen::Matrix<double, 24, 24> P_init = MD(24,24)::Identity() * 0.01;
     P_init.block<3, 3>(21, 21) = MD(3,3)::Identity() * 0.0001;
@@ -1087,14 +1092,14 @@ int main(int argc, char** argv)
                             imu_next = *(imu_deque.front());
                             imu_deque.pop_front();
                             double dt = imu_last.header.stamp.toSec() - time_predict_last_const;
-                            //~ 更新了状态，但没更新协方差？   预测部分，预测时没有考虑饱和。论文4.3.1
+                            // 在IMU到来时，进行的predict。此时预测新的状态（和协方差），对应论文的4.3.1节
                             kf_output.predict(dt, Q_output, input_in, true, false);                 
                             predict_x_cnt++;
 
-                            // ROS_WARN(" ---- Predict 1: update x ----");
-                            // kf_output.print_x();
+                            time_predict_last_const = imu_last.header.stamp.toSec(); // big problem 
+                            //~ 这个big problem是作者注释的。这里应该是有问题。这里的更新时间，有个predict_last，还有个update_last，应该是为了区分上一次更新/预测的时间
+                            //~ 在`!prop_at_freq_of_imu`中修改了update_last的时间，但目前程序没有执行这一步。因此，update_last这个时间一直是IMU的数据为准。
 
-                            time_predict_last_const = imu_last.header.stamp.toSec(); // big problem
                             imu_comes = time_current > imu_next.header.stamp.toSec();
                             // if (!imu_comes)
                             {
@@ -1106,12 +1111,12 @@ int main(int argc, char** argv)
                                     double propag_imu_start = omp_get_wtime();
 
                                     kf_output.predict(dt_cov, Q_output, input_in, false, true);     //~ 这里只更新协方差，没更新状态x
-                                 		//~ Paper Sec.4.3.1 eq(9)   predict_cov_cnt++;
-                                    // ROS_WARN(" ---- Predict 1: update cov----");        //~ DEBUG: 
-                                    // kf_output.print_x();
+                                    predict_cov_cnt++;
 
                                     propag_time += omp_get_wtime() - propag_imu_start;
                                     double solve_imu_start = omp_get_wtime();
+
+                                    // IMU的 update 。论文 Algorithm1 的12-16行
                                     kf_output.update_iterated_dyn_share_IMU();
                                     update_iterated_dyn_share_IMU_cnt++;
 
@@ -1126,7 +1131,7 @@ int main(int argc, char** argv)
                     double dt = time_current - time_predict_last_const;
                     double propag_state_start = omp_get_wtime();
                     
-                    if(!prop_at_freq_of_imu)            //~ prop_at_freq_of_imu = true.
+                    if(!prop_at_freq_of_imu)            //~ prop_at_freq_of_imu = true. 如果是false，则会以lidar的频率进行预测。
                     {
                         cout << "ISSUE: prop_at_freq_of_imu is true. So not this line appears." << endl; 
                         double dt_cov = time_current - time_update_last;
@@ -1137,9 +1142,8 @@ int main(int argc, char** argv)
                         }
                     }
 
+                    // 在LiDAR到来时，进行的predict。
                     kf_output.predict(dt, Q_output, input_in, true, false);
-                    // ROS_WARN_STREAM(" ---- Predict 2: cov ? Why predict again? "<<__LINE__ << " in file: "<< __FILE__);        //~ DEBUG: 
-                    // kf_output.print_x();
 
                     propag_time += omp_get_wtime() - propag_state_start;
                     time_predict_last_const = time_current;
@@ -1157,16 +1161,13 @@ int main(int argc, char** argv)
                         idx += time_seq[k];
                         continue;
                     }
-                    if (!kf_output.update_iterated_dyn_share_modified())            //~ ISSUE: modified 是什么？
+                    
+
+                    // LiDAR 的 update 操作。论文 Algorithm1 的4-8行
+                    if (!kf_output.update_iterated_dyn_share_modified())
                     {
-                        // ROS_WARN_STREAM(" ---- Predict 2 ? Why predict again? "<<__LINE__ << " in file: "<< __FILE__);        //~ DEBUG: 
-                        // kf_output.print_x();
-                        update_iterated_dyn_share_modified_cnt++;
                         idx = idx+time_seq[k];
                         continue;
-                    }
-                    else{       // DEBUG:
-                        update_iterated_dyn_share_modified_cnt++;
                     }
 
                     solve_start = omp_get_wtime();
