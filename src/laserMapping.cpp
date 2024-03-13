@@ -771,9 +771,12 @@ int main(int argc, char** argv)
     p_imu->lidar_type = p_pre->lidar_type = lidar_type;
     p_imu->imu_en = imu_en;
 
+    //~ Initialize pointers.
     //~ point-lio-input模型中，状态量是imu的bias，而在point-lio(-output)中加入了加速度和角速度作为状态量
     kf_input.init_dyn_share_modified(get_f_input, df_dx_input, h_model_input);      // ISSUE: 为什么同时需要input和output，而不是选择？
     kf_output.init_dyn_share_modified_2h(get_f_output, df_dx_output, h_model_output, h_model_IMU_output);
+
+
     Eigen::Matrix<double, 24, 24> P_init = MD(24,24)::Identity() * 0.01;
     P_init.block<3, 3>(21, 21) = MD(3,3)::Identity() * 0.0001;
     P_init.block<6, 6>(15, 15) = MD(6,6)::Identity() * 0.001;
@@ -1103,7 +1106,7 @@ int main(int argc, char** argv)
                                     double propag_imu_start = omp_get_wtime();
 
                                     kf_output.predict(dt_cov, Q_output, input_in, false, true);     //~ 这里只更新协方差，没更新状态x
-                                    predict_cov_cnt++;
+                                 		//~ Paper Sec.4.3.1 eq(9)   predict_cov_cnt++;
                                     // ROS_WARN(" ---- Predict 1: update cov----");        //~ DEBUG: 
                                     // kf_output.print_x();
 
@@ -1160,7 +1163,6 @@ int main(int argc, char** argv)
                         // kf_output.print_x();
                         update_iterated_dyn_share_modified_cnt++;
                         idx = idx+time_seq[k];
-                        cout << "update_iterated_dyn_share_modified = false, in line: " << __LINE__ << endl;
                         continue;
                     }
                     else{       // DEBUG:

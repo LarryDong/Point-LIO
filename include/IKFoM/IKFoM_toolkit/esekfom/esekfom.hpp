@@ -123,6 +123,10 @@ public:
 	}
 	
 	//~ 这个加入了IMU用作观测数据，即output模式
+	// f_in: get_f_output
+	// f_x_in: df_dx_output
+	// h_dyn_share_in1: h_model_output
+	// h_dyn_share_in2: h_model_IMU_output
 	void init_dyn_share_modified_2h(processModel f_in, processMatrix1 f_x_in, measurementModel_dyn_share_modified h_dyn_share_in1, measurementModel_dyn_share_modified h_dyn_share_in2)
 	{
 		f = f_in;
@@ -137,29 +141,29 @@ public:
 		x_.build_SEN_state();
 	}
 
-	// iterated error state EKF propogation
+	// iterated error state EKF propogation.
+	//~ Section. 4.3.1
 	void predict(double &dt, processnoisecovariance &Q, const input &i_in, bool predict_state, bool prop_cov){
-		//~ Paper Sec.4.3.1 eq(9)
 		if (predict_state)
 		{
-			flatted_state f_ = f(x_, i_in);
-			x_.oplus(f_, dt);
+			flatted_state f_ = f(x_, i_in);			// Here, `f` is `get_f_output`, eq(9)
+			x_.oplus(f_, dt);						// eq(9), oplus.
 		}
 
 		//~ Paper Sec.4.3.1 eq(10)
 		if (prop_cov)
 		{
-			flatted_state f_ = f(x_, i_in);
+			flatted_state f_ = f(x_, i_in);			// f: get_f_output, is f(x_k, in), is the state propogation.
 			// state x_before = x_;
 
-			cov_ f_x_ = f_x(x_, i_in);
+			cov_ f_x_ = f_x(x_, i_in);				// `f_x` is `df_dx_output`, eq(11). But the returned cov without I and dt.
 			cov f_x_final;
 			F_x1 = cov::Identity();
 			for (std::vector<std::pair<std::pair<int, int>, int> >::iterator it = x_.vect_state.begin(); it != x_.vect_state.end(); it++) {
 				int idx = (*it).first.first;
 				int dim = (*it).first.second;
 				int dof = (*it).second;
-				for(int i = 0; i < n; i++){
+				for(int i = 0; i < n; i++){		//~ n=3. n = state::DOF, m = state::DIM, l = measurement::DOF
 					for(int j=0; j<dof; j++)
 					{f_x_final(idx+j, i) = f_x_(dim+j, i);}	
 				}
@@ -182,12 +186,13 @@ public:
 				}
 			}
 	
-			F_x1 += f_x_final * dt;
-			P_ = F_x1 * P_ * (F_x1).transpose() + Q * (dt * dt);
+			F_x1 += f_x_final * dt;									//~ This is the "TRUE" `F_{x_k}` in eq(11)
+			P_ = F_x1 * P_ * (F_x1).transpose() + Q * (dt * dt);	//~ propogate state's cov.
 		}
 	}
 
 	//~ IMU input和output模式都有这个函数
+	// LiDAR update?
 	bool update_iterated_dyn_share_modified() {			// TODO: 
 		dyn_share_modified<scalar_type> dyn_share;
 		state x_propagated = x_;
@@ -199,16 +204,16 @@ public:
 			// 调用了 h_dyn_share_modified_1 函数，这个函数的类型是 `measurementModel_dyn_share_modified`
 			// measurementModel_dyn_share_modified 是 void (state &, dyn_share_modified<scalar_type> &) 这个类型函数的一个别名；
 			// 具体的，这个函数的实现是： h_dyn_share_modified_1 指向的 `h_dyn_share_in`（在初始化init_dyn_share_modified(_2h)中）
-			// 而 h_dyn_share_in 是 h_model_input，在 estimateor.cpp 中被定义了具体实现。
-			h_dyn_share_modified_1(x_, dyn_share);				// 就是调用了：h_model_input(x_, dyn_share) 这个函数
+			// 而 h_dyn_share_in 是 h_model_output estimateor.cpp 中被定义了具体实现。
+			h_dyn_share_modified_1(x_, dyn_share);				// 就是调用了: h_model_output(x_, dyn_share) 这个函数, LiDAR's observation model.
 			if(! dyn_share.valid)
 			{
 				return false;
 				// continue;
 			}
-			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> z = dyn_share.z;
+			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> z = dyn_share.z;			//~ LiDAR residual. eq(12)'s r_L_{k+1}
 			// Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> R = dyn_share.R; 
-			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x = dyn_share.h_x;
+			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x = dyn_share.h_x;		//~ This `h_x` is first 12 cols of 'H_L_{k+1}' in eq(12)(13), and the following 0x18 is omitted.
 			// Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_v = dyn_share.h_v;
 			dof_Measurement = h_x.rows();
 			m_noise = dyn_share.M_Noise;
@@ -245,81 +250,30 @@ public:
 			x_.boxplus(dx_);
 			dyn_share.converge = true;
 			
-			// L_ = P_;
-			// Matrix<scalar_type, 3, 3> res_temp_SO3;
-			// MTK::vect<3, scalar_type> seg_SO3;
-			// for(typename std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
-			// 	int idx = (*it).first;
-			// 	for(int i = 0; i < 3; i++){
-			// 		seg_SO3(i) = dx_(i + idx);
-			// 	}
-			// 	res_temp_SO3 = A_matrix(seg_SO3).transpose();
-			// 	for(int i = 0; i < n; i++){
-			// 		L_. template block<3, 1>(idx, i) = res_temp_SO3 * (P_. template block<3, 1>(idx, i)); 
-			// 	}
-			// 	{
-			// 		for(int i = 0; i < dof_Measurement; i++){
-			// 			K_. template block<3, 1>(idx, i) = res_temp_SO3 * (K_. template block<3, 1>(idx, i));
-			// 		}
-			// 	}
-			// 	for(int i = 0; i < n; i++){
-			// 		L_. template block<1, 3>(i, idx) = (L_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
-			// 		// P_. template block<1, 3>(i, idx) = (P_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
-			// 	}
-			// 	for(int i = 0; i < n; i++){
-			// 		P_. template block<1, 3>(i, idx) = (P_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
-			// 	}
-			// }
-			// Matrix<scalar_type, 2, 2> res_temp_S2;
-			// MTK::vect<2, scalar_type> seg_S2;
-			// for(typename std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
-			// 	int idx = (*it).first;
-		
-			// 	for(int i = 0; i < 2; i++){
-			// 		seg_S2(i) = dx_(i + idx);
-			// 	}
-		
-			// 	Eigen::Matrix<scalar_type, 2, 3> Nx;
-			// 	Eigen::Matrix<scalar_type, 3, 2> Mx;
-			// 	x_.S2_Nx_yy(Nx, idx);
-			// 	x_propagated.S2_Mx(Mx, seg_S2, idx);
-			// 	res_temp_S2 = Nx * Mx; 
-	
-			// 	for(int i = 0; i < n; i++){
-			// 		L_. template block<2, 1>(idx, i) = res_temp_S2 * (P_. template block<2, 1>(idx, i)); 
-			// 	}
-				
-			// 	{
-			// 		for(int i = 0; i < dof_Measurement; i++){
-			// 			K_. template block<2, 1>(idx, i) = res_temp_S2 * (K_. template block<2, 1>(idx, i));
-			// 		}
-			// 	}
-			// 	for(int i = 0; i < n; i++){
-			// 		L_. template block<1, 2>(i, idx) = (L_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
-			// 	}
-			// 	for(int i = 0; i < n; i++){
-			// 		P_. template block<1, 2>(i, idx) = (P_. template block<1, 2>(i, idx)) * res_temp_S2.transpose();
-			// 	}
-			// }
-			// if(n > dof_Measurement)
+			//~ only update the first 12 state. <pos, rotation, extrins_R, extrins_T>, 
+			// the acc/gyro/bg/ba are updated in `update_iterated_dyn_share_IMU`.
+			// But vel, grav, are not updated.
 			{
-				P_ = P_ - K_*h_x*P_. template block<12, n>(0, 0);
+				P_ = P_ - K_*h_x*P_. template block<12, n>(0, 0);		// eq(20)-4, update lidar's part P_
 			}
 		}
 		return true;
 	}
 	
 	//~ IMU input模式没有这个函数，但output模式有这个函数
+	// IMU IKEF update process. See Algorithm1 line 12~16
 	void update_iterated_dyn_share_IMU() {
 		
 		dyn_share_modified<scalar_type> dyn_share;
 		for(int i=0; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;
-			h_dyn_share_modified_2(x_, dyn_share);
 
-			Matrix<scalar_type, 6, 1> z = dyn_share.z_IMU;
+			//~ `h_dyn_share_modified_2` is `h_model_IMU_output()`, IMU observation model. Get residual z.
+			h_dyn_share_modified_2(x_, dyn_share);				// this 
 
+			Matrix<scalar_type, 6, 1> z = dyn_share.z_IMU;		//~ z is residual. eq(14) result.
+			//~ PHt, HP, HPHt, is in eq(20)
 			Matrix<double, 30, 6> PHT;
             Matrix<double, 6, 30> HP;
             Matrix<double, 6, 6> HPHT;
@@ -331,23 +285,25 @@ public:
 				if (!dyn_share.satu_check[l_])
 				{
 					PHT.col(l_) = P_.col(15+l_) + P_.col(24+l_);
-					HP.row(l_) = P_.row(15+l_) + P_.row(24+l_);
+					HP.row(l_) = P_.row(15+l_) + P_.row(24+l_);	//~ HP is H*P in eq(20), where H is eq(15). So only some block of P is used.
 				}
 			}
+
+			//~ update state by IMU's measurement. Only for 15(omg)-21(acc), 24(bg)-30(ba). l is the IMU dimension
 			for (int l_ = 0; l_ < 6; l_++)
 			{
 				if (!dyn_share.satu_check[l_])
 				{
-					HPHT.col(l_) = HP.col(15+l_) + HP.col(24+l_);
+					HPHT.col(l_) = HP.col(15+l_) + HP.col(24+l_);	// eq(20)-3, HPH+R,
 				}
-				HPHT(l_, l_) += dyn_share.R_IMU(l_); //, l);
+				HPHT(l_, l_) += dyn_share.R_IMU(l_); //, l);		// eq(20)-3, R.
 			}
-        	Eigen::Matrix<double, 30, 6> K = PHT * HPHT.inverse(); 
-                                    
-            Matrix<scalar_type, n, 1> dx_ = K * z; 
+        	Eigen::Matrix<double, 30, 6> K = PHT * HPHT.inverse(); 	// Kalman gain. P*H'*(H*P*H')^-1
 
-            P_ -= K * HP;
-			x_.boxplus(dx_);
+            Matrix<scalar_type, n, 1> dx_ = K * z; 					// eq(21)'s \delta_x_{k+1}
+
+            P_ -= K * HP;			// eq(20)-4
+			x_.boxplus(dx_);		// eq(21)
 		}
 		return;
 	}

@@ -78,14 +78,19 @@ Eigen::Matrix<double, 24, 1> get_f_input(state_input &s, const input_ikfom &in)
 	return res;
 }
 
+
+// Prediction model (imu_ouput mode)
+// This function update: position, rotation, and velocity. the `dt` is not included.
+// Eq(9), x_{k+1} ^ = x_k \Oplus (dt * f(x_k, 0)), `get_f_output` is "f(x_k, 0)"
 Eigen::Matrix<double, 30, 1> get_f_output(state_output &s, const input_ikfom &in)
 {
+	//~ `res` is the 30x1 state. 
 	Eigen::Matrix<double, 30, 1> res = Eigen::Matrix<double, 30, 1>::Zero();
 	vect3 a_inertial = s.rot * s.acc; 
 	for(int i = 0; i < 3; i++ ){
-		res(i) = s.vel[i];
-		res(i + 3) = s.omg[i]; 
-		res(i + 12) = a_inertial[i] + s.gravity[i]; 
+		res(i) = s.vel[i];				// pos(0) = velocity*dt
+		res(i + 3) = s.omg[i]; 			// rotation(3) = omega*dt 
+		res(i + 12) = a_inertial[i] + s.gravity[i]; 	// velocity(12) = acc*dt.
 	}
 	return res;
 }
@@ -108,6 +113,7 @@ Eigen::Matrix<double, 24, 24> df_dx_input(state_input &s, const input_ikfom &in)
 	return cov;
 }
 
+//~ This function is deleted by author. Is should be eq(11) F_{w_k}
 // Eigen::Matrix<double, 24, 12> df_dw_input(state_input &s, const input_ikfom &in)
 // {
 // 	Eigen::Matrix<double, 24, 12> cov = Eigen::Matrix<double, 24, 12>::Zero();
@@ -118,17 +124,38 @@ Eigen::Matrix<double, 24, 24> df_dx_input(state_input &s, const input_ikfom &in)
 // 	return cov;
 // }
 
+
+
+/* Function:df_dx_output
+
+description: eq(11)'s F_{x_k} without I and dt.
+
+state in this code.
+	0-((vect3, pos))  
+	3-((SO3, rot))
+	6-((SO3, offset_R_L_I))
+	9-((vect3, offset_T_L_I))
+	12-((vect3, vel))
+	15-((vect3, omg))
+	18-((vect3, acc))
+	21-((vect3, gravity))
+	((vect3, bg))
+	((vect3, ba))
+state in paper:
+	R, p, v, bg, ba, g, w, a;
+*/
 Eigen::Matrix<double, 30, 30> df_dx_output(state_output &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, 30, 30> cov = Eigen::Matrix<double, 30, 30>::Zero();
-	cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();
-	cov.template block<3, 3>(12, 3) = -s.rot*MTK::hat(s.acc);
-	cov.template block<3, 3>(12, 18) = s.rot;
+	cov.template block<3, 3>(12, 3) = -s.rot*MTK::hat(s.acc);			// d_v/d_rot -> eq(11)'s F31.  without dt(\Delta t_k)
+	cov.template block<3, 3>(12, 18) = s.rot;							// d_v/d_acc -> eq(11)'s F38,  w.o. dt.
+
 	// Eigen::Matrix<state_ikfom::scalar, 2, 1> vec = Eigen::Matrix<state_ikfom::scalar, 2, 1>::Zero();
 	// Eigen::Matrix<state_ikfom::scalar, 3, 2> grav_matrix;
 	// s.S2_Mx(grav_matrix, vec, 21);
-	cov.template block<3, 3>(12, 21) = Eigen::Matrix3d::Identity(); // grav_matrix; 
-	cov.template block<3, 3>(3, 15) = Eigen::Matrix3d::Identity(); 
+	cov.template block<3, 3>(0, 12) = Eigen::Matrix3d::Identity();		// d_pos/d_v -> eq(11)'s block F_xk(2,3) 
+	cov.template block<3, 3>(12, 21) = Eigen::Matrix3d::Identity(); 	// d_v/d_g. grav_matrix; eq(11) F_xk(3,6)
+	cov.template block<3, 3>(3, 15) = Eigen::Matrix3d::Identity(); 		// d_R/d_w; eq(11) F_xk(1,7)
 	return cov;
 }
 
@@ -195,6 +222,8 @@ vect3 SO3ToEuler(const SO3 &rot)
     return ang;
 }
 
+
+
 void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_data)
 {
 	bool match_in_map = false;
@@ -202,6 +231,7 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 	pabcd.setZero();
 	normvec->resize(time_seq[k]);
 	int effect_num_k = 0;
+
 	for (int j = 0; j < time_seq[k]; j++)
 	{
 		PointType &point_body_j  = feats_down_body->points[idx+j+1];
@@ -233,7 +263,7 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 						normvec->points[j].x = pabcd(0);
 						normvec->points[j].y = pabcd(1);
 						normvec->points[j].z = pabcd(2);
-						normvec->points[j].intensity = pabcd(3);
+						normvec->points[j].intensity = pabcd(3);		// plan's normal value.
 						effect_num_k ++;
 					}
 				}  
@@ -245,6 +275,7 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 		ekfom_data.valid = false;
 		return;
 	}
+
 	ekfom_data.M_Noise = laser_point_cov;
 	ekfom_data.h_x = Eigen::MatrixXd::Zero(effect_num_k, 12);
 	ekfom_data.z.resize(effect_num_k);
@@ -255,7 +286,7 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 		{
 			V3D norm_vec(normvec->points[j].x, normvec->points[j].y, normvec->points[j].z);
 			
-			if (extrinsic_est_en)
+			if (extrinsic_est_en)		//~ estimate IMU-LiDAR extrinsics. Default: false.
 			{
 				V3D p_body = pbody_list[idx+j+1];
 				M3D p_crossmat, p_imu_crossmat;
@@ -264,7 +295,7 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 				p_imu_crossmat << SKEW_SYM_MATRX(point_imu);
 				V3D C(s.rot.transpose() * norm_vec);
 				V3D A(p_imu_crossmat * C);
-				V3D B(p_crossmat * s.offset_R_L_I.transpose() * C);
+				V3D B(p_crossmat * s.offset_R_L_I.transpose() * C);		//~ extrinsics J.
 				ekfom_data.h_x.block<1, 12>(m, 0) << norm_vec(0), norm_vec(1), norm_vec(2), VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C);
 			}
 			else
@@ -281,6 +312,10 @@ void h_model_input(state_input &s, esekfom::dyn_share_modified<double> &ekfom_da
 	effct_feat_num += effect_num_k;
 }
 
+
+
+//~ The LiDAR observation model, and residual calculation
+// eq(6), eq(8) and eq(12) eq(13)
 void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_data)
 {
 	bool match_in_map = false;
@@ -289,6 +324,8 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 	
 	normvec->resize(time_seq[k]);
 	int effect_num_k = 0;
+
+	//~ calculate each point's nearest's plane norm.
 	for (int j = 0; j < time_seq[k]; j++)
 	{
 		PointType &point_body_j  = feats_down_body->points[idx+j+1];
@@ -300,6 +337,7 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 		{
 			auto &points_near = Nearest_Points[idx+j+1];
 			
+			//~ search nearset 5 points in kdtree, for plane. ISSUE: what is 2.236? m.
 			ikdtree.Nearest_Search(point_world_j, NUM_MATCH_POINTS, points_near, pointSearchSqDis, 2.236); 
 			
 			if ((points_near.size() < NUM_MATCH_POINTS) || pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5)
@@ -309,7 +347,7 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 			else
 			{
 				point_selected_surf[idx+j+1] = false;
-				if (esti_plane(pabcd, points_near, plane_thr)) //(planeValid)
+				if (esti_plane(pabcd, points_near, plane_thr)) //(planeValid)			//~ pabcd: plane's normal vector, and its normal.
 				{
 					float pd2 = pabcd(0) * point_world_j.x + pabcd(1) * point_world_j.y + pabcd(2) * point_world_j.z + pabcd(3);
 					
@@ -332,9 +370,13 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 		ekfom_data.valid = false;
 		return;
 	}
+
+
 	ekfom_data.M_Noise = laser_point_cov;
 	ekfom_data.h_x = Eigen::MatrixXd::Zero(effect_num_k, 12);
 	ekfom_data.z.resize(effect_num_k);
+
+	//~ calculate residual??
 	int m = 0;
 	for (int j = 0; j < time_seq[k]; j++)
 	{
@@ -360,8 +402,12 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 				V3D C(s.rot.transpose() * norm_vec);
 				V3D A(point_crossmat * C);
 				// V3D A(point_crossmat * state.rot_end.transpose() * norm_vec);
+				
+				//~ h_x: < 0-pos, rot, extrins_R, (10-12)extrins_T >, vel, omg, acc, grav, bg, bg. eq(13). 0_{1x18} is omiited.
 				ekfom_data.h_x.block<1, 12>(m, 0) << norm_vec(0), norm_vec(1), norm_vec(2), VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+
 			}
+			// eq(12), h_L(x^, p, 0)
 			ekfom_data.z(m) = -norm_vec(0) * feats_down_world->points[idx+j+1].x -norm_vec(1) * feats_down_world->points[idx+j+1].y -norm_vec(2) * feats_down_world->points[idx+j+1].z-normvec->points[j].intensity;
 			m++;
 		}
@@ -369,12 +415,14 @@ void h_model_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_
 	effct_feat_num += effect_num_k;
 }
 
+
+//~ The IMU observation model. eq(7)/(8), eq(14)
 void h_model_IMU_output(state_output &s, esekfom::dyn_share_modified<double> &ekfom_data)
 {
     std::memset(ekfom_data.satu_check, false, 6);
-	ekfom_data.z_IMU.block<3,1>(0, 0) = angvel_avr - s.omg - s.bg;
-	ekfom_data.z_IMU.block<3,1>(3, 0) = acc_avr * G_m_s2 / acc_norm - s.acc - s.ba;
-    ekfom_data.R_IMU << imu_meas_omg_cov, imu_meas_omg_cov, imu_meas_omg_cov, imu_meas_acc_cov, imu_meas_acc_cov, imu_meas_acc_cov;
+	ekfom_data.z_IMU.block<3,1>(0, 0) = angvel_avr - s.omg - s.bg;						// eq(14)
+	ekfom_data.z_IMU.block<3,1>(3, 0) = acc_avr * G_m_s2 / acc_norm - s.acc - s.ba;		// eq(14)
+    ekfom_data.R_IMU << imu_meas_omg_cov, imu_meas_omg_cov, imu_meas_omg_cov, imu_meas_acc_cov, imu_meas_acc_cov, imu_meas_acc_cov;	//~ IMU measurement uncertainty.
 	if(check_satu)
 	{
 		if(fabs(angvel_avr(0)) >= 0.99 * satu_gyro)
