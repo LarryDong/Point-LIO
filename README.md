@@ -1,3 +1,28 @@
+
+# Point-LIO with (limited) Chinese Comments
+# PLIO 部分注释版（添加了部分中文注释）
+
+这是自己对Point-LIO代码（版本：bd385e5，master分支，2024年3月拉取）做的一些注释，主要集中在：
+
+- laserMapping主线程部分，对流程上的一些注释；
+- IEKF部分的一些注释，和论文中的公式进行了对应；
+- 只注释了IMU作为output模式的函数，这也是PLIO论文中主要的模式。作为input模式理论上更简略。
+
+ikdtree部分、以及其他和Fastlio相似的部分，没有进行注释。
+
+更多参考：  
+[fastlio2的简化/注释版](https://github.com/zlwang7/S-FAST_LIO)
+
+自己注释代码过程中，在CSDN的一些总结：  
+[【PLIO学习总结】laserMapping中的时间戳与状态更新逻辑](https://blog.csdn.net/tfb760/article/details/136651575)  
+[【PLIO学习记录】PointLIO代码 update_iterated_dyn_share_modified 中函数指针的用法](https://blog.csdn.net/tfb760/article/details/136571805)  
+
+仅供参考。能力有限，如有错误，请批评指正。
+
+
+**以下部分为PLIO原始部分。**
+---
+
 # Point-LIO
 ## 1. Introduction
 
